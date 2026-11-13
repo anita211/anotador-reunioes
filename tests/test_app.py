@@ -1,0 +1,103 @@
+import queue
+from datetime import datetime
+from pathlib import Path
+
+from anotador.app import Controller
+from anotador.config import Config
+from anotador.detector import MeetingDetector
+from anotador.recorder import Recording
+
+
+class FakeRecorder:
+    def __init__(self, fail=False):
+        self.active = False
+        self.fail = fail
+        self.cancelled = 0
+
+    def start(self):
+        if self.fail:
+            raise OSError("sem dispositivo")
+        self.active = True
+
+    def stop(self):
+        self.active = False
+        return Recording(Path("s.wav"), Path("m.wav"), datetime(2026, 11, 13))
+
+    def cancel(self):
+        self.active = False
+        self.cancelled += 1
+
+
+class Probe:
+    def __init__(self):
+        self.mic, self.title = False, None
+
+
+def make(fail=False):
+    probe, warns, q = Probe(), [], queue.Queue()
+    c = Controller(
+        Config(),
+        MeetingDetector(30, 15),
+        FakeRecorder(fail),
+        q,
+        warn=lambda on_cancel, secs: warns.append((on_cancel, secs)),
+        mic_probe=lambda exe: probe.mic,
+        title_probe=lambda exe, kw: probe.title,
+    )
+    return c, probe, warns, q
+
+
+def test_start_records_and_warns_once():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    c.tick(3)
+    assert c.recorder.active
+    assert len(warns) == 1 and warns[0][1] == 15.0
+
+
+def test_stop_enqueues_with_title():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    probe.mic, probe.title = False, None
+    c.tick(10)
+    c.tick(26)
+    rec, title = q.get_nowait()
+    assert title == "Meet - abc" and rec.mic_wav == Path("m.wav")
+    assert not c.recorder.active
+
+
+def test_cancel_from_warning_discards():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    warns[0][0]()  # usuário clicou "Cancelar gravação"
+    c.tick(3)
+    assert c.recorder.cancelled == 1 and not c.recorder.active
+    assert q.empty()
+
+
+def test_title_probe_only_when_mic_on():
+    calls = []
+    c, probe, warns, q = make()
+    c._title_probe = lambda exe, kw: calls.append(1)
+    c.tick(0)
+    assert calls == []
+
+
+def test_recorder_failure_does_not_crash_and_resets():
+    c, probe, warns, q = make(fail=True)
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    assert not c.detector.recording
+    assert warns == []
+
+
+def test_manual_start_and_stop():
+    c, probe, warns, q = make()
+    c.manual_start(0)
+    assert c.recorder.active and warns == []
+    c.manual_stop()
+    assert not c.recorder.active
+    assert q.get_nowait()[1] is None
