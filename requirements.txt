@@ -5,3 +5,4 @@ Pillow
 windows-toasts
 pywin32
 pytest
+pycaw

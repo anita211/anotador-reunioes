@@ -123,77 +123,61 @@ class MeetingDetector:
 
 # --- Sondas do Windows (verificadas manualmente) ---------------------------------
 
-_MIC_KEY = (
-    r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager"
-    r"\ConsentStore\microphone\NonPackaged"
-)
+def mic_active_from_sessions(sessions, exe_name: str) -> bool:
+    """sessions: (nome do executável, estado) de cada sessão de captura; estado 1 = ativa."""
+    target = exe_name.lower()
+    return any(name.lower() == target and state == 1 for name, state in sessions)
 
 
-def mic_in_use_from_entries(entries, exe_name: str, process_running: bool) -> bool:
-    """Decide pelo registro: (nome, LastUsedTimeStart, LastUsedTimeStop) de cada app.
-
-    Exige o processo rodando: se o navegador travou segurando o microfone, o registro
-    pode ficar com Stop=0 para sempre.
-    """
-    if not process_running:
-        return False
-    suffix = "#" + exe_name.lower()
-    return any(name.lower().endswith(suffix) and start and stop == 0 for name, start, stop in entries)
-
-
-def _mic_entries() -> list[tuple[str, int, int]]:
-    import winreg
-
-    entries = []
-    try:
-        root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _MIC_KEY)
-    except OSError:
-        return entries
-    with root:
-        i = 0
-        while True:
-            try:
-                name = winreg.EnumKey(root, i)
-            except OSError:
-                break
-            i += 1
-            try:
-                with winreg.OpenKey(root, name) as sub:
-                    start, _ = winreg.QueryValueEx(sub, "LastUsedTimeStart")
-                    stop, _ = winreg.QueryValueEx(sub, "LastUsedTimeStop")
-            except OSError:
-                continue
-            entries.append((name, start, stop))
-    return entries
-
-
-def _process_running(exe_name: str) -> bool:
+def _pid_image(pid: int) -> str | None:
     import win32api
     import win32con
     import win32process
 
-    target = exe_name.lower()
-    for pid in win32process.EnumProcesses():
+    try:
+        handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    except Exception:
+        return None
+    try:
+        return win32process.GetModuleFileNameEx(handle, 0).rsplit("\\", 1)[-1]
+    except Exception:
+        return None
+    finally:
+        win32api.CloseHandle(handle)
+
+
+def _capture_sessions() -> list[tuple[str, int]]:
+    """Sessões de áudio de captura (microfones) segundo o sistema de áudio do Windows."""
+    import comtypes
+    from comtypes import CLSCTX_ALL
+    from pycaw.constants import DEVICE_STATE, EDataFlow
+    from pycaw.pycaw import AudioUtilities, IAudioSessionControl2, IAudioSessionManager2
+
+    try:
+        comtypes.CoInitialize()
+    except OSError:
+        pass  # já inicializado nesta thread
+    out = []
+    devices = AudioUtilities.GetDeviceEnumerator().EnumAudioEndpoints(
+        EDataFlow.eCapture.value, DEVICE_STATE.ACTIVE.value
+    )
+    for i in range(devices.GetCount()):
         try:
-            handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            manager = devices.Item(i).Activate(IAudioSessionManager2._iid_, CLSCTX_ALL, None)
+            sessions = manager.QueryInterface(IAudioSessionManager2).GetSessionEnumerator()
+            for j in range(sessions.GetCount()):
+                control = sessions.GetSession(j).QueryInterface(IAudioSessionControl2)
+                name = _pid_image(control.GetProcessId())
+                if name:
+                    out.append((name, control.GetState()))
         except Exception:
             continue
-        try:
-            if win32process.GetModuleFileNameEx(handle, 0).rsplit("\\", 1)[-1].lower() == target:
-                return True
-        except Exception:
-            pass
-        finally:
-            win32api.CloseHandle(handle)
-    return False
+    return out
 
 
 def browser_mic_in_use(exe_name: str) -> bool:
-    """True se o Windows registra o navegador usando o microfone agora."""
-    entries = _mic_entries()
-    if not mic_in_use_from_entries(entries, exe_name, process_running=True):
-        return False
-    return _process_running(exe_name)
+    """True se o navegador tem uma sessão de microfone ativa agora."""
+    return mic_active_from_sessions(_capture_sessions(), exe_name)
 
 
 def _process_image_name(hwnd: int) -> str | None:

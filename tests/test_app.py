@@ -103,7 +103,7 @@ def test_recorder_failure_does_not_crash_and_resets():
 def test_manual_start_and_stop():
     c, probe, warns, q = make()
     c.manual_start(0)
-    assert c.recorder.active and warns == []
+    assert c.recorder.active and len(warns) == 1   # confirmação visual do clique
     c.manual_stop()
     assert not c.recorder.active
     assert q.get_nowait()[1] is None
@@ -171,3 +171,20 @@ def test_broken_recorder_restarts_without_warning():
     assert q.get_nowait()[1] == "Meet - abc"
     assert c.recorder.active and c.recorder.starts == 2
     assert len(warns) == 1
+
+
+def test_toggle_manual_starts_then_stops():
+    c, probe, warns, q = make()
+    c.toggle_manual(0)
+    assert c.recorder.active
+    c.toggle_manual(5)
+    assert not c.recorder.active and not q.empty()
+
+
+def test_toggle_during_auto_recording_stops_it():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    c.toggle_manual(5)
+    assert not c.recorder.active
+    assert q.get_nowait()[1] == "Meet - abc"

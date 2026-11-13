@@ -90,7 +90,16 @@ class Controller:
             if self.recorder.active:
                 return
             self.detector.force_start(now)
-            self._start_recorder(now)
+            if self._start_recorder(now):
+                self._warn(self.cancel_current, self.cfg.warning_seconds)
+
+    def toggle_manual(self, now: float) -> None:
+        """Clique no ícone: inicia se parado, para se gravando."""
+        with self._lock:
+            if self.recorder.active:
+                self.manual_stop()
+            else:
+                self.manual_start(now)
 
     def manual_stop(self) -> None:
         with self._lock:
@@ -207,8 +216,11 @@ def main() -> None:
         icon.stop()
 
     menu = pystray.Menu(
-        pystray.MenuItem("Iniciar gravação", lambda i, _: controller.manual_start(time.monotonic())),
-        pystray.MenuItem("Parar gravação", lambda i, _: controller.manual_stop()),
+        pystray.MenuItem(
+            lambda _item: "Parar gravação" if controller.recorder.active else "Iniciar gravação",
+            lambda i, _: controller.toggle_manual(time.monotonic()),
+            default=True,  # clique esquerdo no ícone
+        ),
         pystray.MenuItem("Abrir pasta de reuniões", lambda i, _: os.startfile(str(cfg.output_dir))),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Sair", on_quit),

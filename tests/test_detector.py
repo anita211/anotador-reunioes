@@ -136,14 +136,10 @@ def test_is_meet_call_title():
     assert not is_meet_call_title("Meet", "Meet")
 
 
-def test_mic_in_use_decision():
-    from anotador.detector import mic_in_use_from_entries
-    entries = [
-        ("C:#Program Files#Opera#opera.exe", 133, 0),
-        ("C:#Windows#other.exe", 133, 0),
-    ]
-    assert mic_in_use_from_entries(entries, "opera.exe", process_running=True)
-    assert not mic_in_use_from_entries(entries, "opera.exe", process_running=False)  # registro "travado"
-    assert not mic_in_use_from_entries([("x#opera.exe", 133, 140)], "opera.exe", True)
-    assert not mic_in_use_from_entries([("x#opera.exe", 0, 0)], "opera.exe", True)
-    assert not mic_in_use_from_entries([], "opera.exe", True)
+def test_mic_active_from_sessions():
+    from anotador.detector import mic_active_from_sessions
+    assert mic_active_from_sessions([("opera.exe", 1), ("claude.exe", 0)], "opera.exe")
+    assert mic_active_from_sessions([("Opera.EXE", 1)], "opera.exe")
+    assert not mic_active_from_sessions([("opera.exe", 0)], "opera.exe")      # sessão inativa
+    assert not mic_active_from_sessions([("python.exe", 1)], "opera.exe")     # outro programa
+    assert not mic_active_from_sessions([], "opera.exe")
