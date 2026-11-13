@@ -1,0 +1,6 @@
+.venv/
+config.json
+__pycache__/
+*.wav
+.superpowers/
+.pytest_cache/

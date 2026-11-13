@@ -1,0 +1,7 @@
+pyaudiowpatch
+faster-whisper
+pystray
+Pillow
+windows-toasts
+pywin32
+pytest

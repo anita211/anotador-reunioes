@@ -1,0 +1,11 @@
+{
+  "browser_exe": "opera.exe",
+  "title_keyword": "Meet",
+  "poll_seconds": 3.0,
+  "title_wait_seconds": 30.0,
+  "stop_grace_seconds": 15.0,
+  "warning_seconds": 15.0,
+  "whisper_model": "small",
+  "claude_cmd": "claude",
+  "claude_timeout_seconds": 600.0
+}
