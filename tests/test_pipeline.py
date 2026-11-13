@@ -1,0 +1,115 @@
+import json
+from dataclasses import replace
+from datetime import datetime
+
+import pytest
+
+from anotador.config import Config
+from anotador.pipeline import process_recording, retry_pending
+from anotador.recorder import Recording
+from anotador.summarizer import SummaryError
+from anotador.transcriber import Segment
+
+
+@pytest.fixture
+def setup(tmp_path):
+    cfg = replace(Config(), output_dir=tmp_path / "out", work_dir=tmp_path / "work")
+    rec_dir = cfg.work_dir / "rec"
+    rec_dir.mkdir(parents=True)
+    rec = Recording(rec_dir / "a-system.wav", rec_dir / "a-mic.wav", datetime(2026, 11, 13, 14, 5))
+    rec.system_wav.write_bytes(b"")
+    rec.mic_wav.write_bytes(b"")
+    return cfg, rec
+
+
+def fake_transcribe(path, model):
+    if "mic" in path.name:
+        return [Segment(5, 6, "Eu reviso.")]
+    return [Segment(1, 2, "Bom dia.")]
+
+
+class Notes:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, path, ok):
+        self.calls.append((path, ok))
+
+
+def failing_summary(*a, **k):
+    raise SummaryError("offline")
+
+
+def test_success_writes_summary_and_deletes_wavs(setup):
+    cfg, rec = setup
+    notes = Notes()
+    path = process_recording(rec, "Meet - Alinhamento", cfg, transcribe=fake_transcribe,
+                             summarize_fn=lambda t, c, to: "## Resumo\nTudo certo.", notify=notes)
+    text = path.read_text(encoding="utf-8")
+    assert "## Resumo\nTudo certo." in text
+    assert "## Transcrição" in text and "Outros: Bom dia." in text and "Eu: Eu reviso." in text
+    assert not rec.system_wav.exists() and not rec.mic_wav.exists()
+    assert not list((cfg.work_dir / "pending").glob("*.json"))
+    assert notes.calls == [(path, True)]
+    assert path.parent == cfg.output_dir
+
+
+def test_summary_failure_keeps_transcript_and_marks_pending(setup):
+    cfg, rec = setup
+    notes = Notes()
+    path = process_recording(rec, None, cfg, transcribe=fake_transcribe,
+                             summarize_fn=failing_summary, notify=notes)
+    text = path.read_text(encoding="utf-8")
+    assert "_Resumo pendente_" in text and "Outros: Bom dia." in text
+    assert not rec.system_wav.exists() and not rec.mic_wav.exists()
+    pending = list((cfg.work_dir / "pending").glob("*.json"))
+    assert len(pending) == 1
+    assert json.loads(pending[0].read_text(encoding="utf-8"))["md_path"] == str(path)
+    assert notes.calls == [(path, False)]
+
+
+def test_transcribe_failure_keeps_wavs(setup):
+    cfg, rec = setup
+
+    def boom(path, model):
+        raise RuntimeError("falhou")
+
+    with pytest.raises(RuntimeError):
+        process_recording(rec, None, cfg, transcribe=boom, summarize_fn=failing_summary)
+    assert rec.system_wav.exists() and rec.mic_wav.exists()
+
+
+def test_retry_pending_success(setup):
+    cfg, rec = setup
+    path = process_recording(rec, None, cfg, transcribe=fake_transcribe, summarize_fn=failing_summary)
+    seen = []
+
+    def ok(transcript, cmd, timeout):
+        seen.append(transcript)
+        return "## Resumo\nAgora sim."
+
+    assert retry_pending(cfg, summarize_fn=ok) == [path]
+    text = path.read_text(encoding="utf-8")
+    assert "## Resumo\nAgora sim." in text and "_Resumo pendente_" not in text
+    assert "Outros: Bom dia." in seen[0]
+    assert not list((cfg.work_dir / "pending").glob("*.json"))
+
+
+def test_retry_pending_failure_keeps_marker(setup):
+    cfg, rec = setup
+    process_recording(rec, None, cfg, transcribe=fake_transcribe, summarize_fn=failing_summary)
+    assert retry_pending(cfg, summarize_fn=failing_summary) == []
+    assert len(list((cfg.work_dir / "pending").glob("*.json"))) == 1
+
+
+def test_retry_pending_md_deleted_drops_marker(setup):
+    cfg, rec = setup
+    path = process_recording(rec, None, cfg, transcribe=fake_transcribe, summarize_fn=failing_summary)
+    path.unlink()
+    assert retry_pending(cfg, summarize_fn=failing_summary) == []
+    assert not list((cfg.work_dir / "pending").glob("*.json"))
+
+
+def test_retry_pending_no_dir(tmp_path):
+    cfg = replace(Config(), work_dir=tmp_path / "nada")
+    assert retry_pending(cfg, summarize_fn=failing_summary) == []
