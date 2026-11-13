@@ -10,6 +10,24 @@ from datetime import datetime
 from pathlib import Path
 
 _STAMP = "%Y%m%d-%H%M%S"
+MAX_PAD_SECONDS = 10 * 60      # lacuna maior que isso (ex.: suspensão) não vira horas de silêncio
+_LAG_TOLERANCE = 0.2           # atraso tolerado antes de completar com silêncio (s)
+
+
+def frames_to_pad(expected_end: int, frame_count: int, written: int, rate: int) -> int:
+    """Quantos frames de silêncio inserir antes de um bloco que chega atrasado."""
+    gap = expected_end - frame_count - written
+    if gap <= int(rate * _LAG_TOLERANCE):
+        return 0
+    return min(gap, MAX_PAD_SECONDS * rate)
+
+
+def silence_chunks(missing_frames: int, frame_bytes: int, max_chunk_frames: int = 48000):
+    """Silêncio em blocos de tamanho limitado (sem alocar gigabytes de uma vez)."""
+    while missing_frames > 0:
+        n = min(missing_frames, max_chunk_frames)
+        yield b"\x00" * (n * frame_bytes)
+        missing_frames -= n
 _NAME_RE = re.compile(r"^(\d{8}-\d{6})-system\.wav$")
 
 
@@ -58,21 +76,32 @@ class _Track:
         self._wav.setnchannels(self.channels)
         self._wav.setsampwidth(self.width)
         self._wav.setframerate(self.rate)
-        self._stream = pa.open(
+        try:
+            self._stream = pa.open(
             format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.rate,
-            input=True,
-            input_device_index=device["index"],
+                channels=self.channels,
+                rate=self.rate,
+                input=True,
+                input_device_index=device["index"],
             frames_per_buffer=1024,
             stream_callback=self._callback,
-        )
+            )
+        except Exception:
+            self._wav.close()
+            self._wav = None
+            path.unlink(missing_ok=True)
+            raise
 
-    def _pad_to(self, target_frames: int) -> None:
-        missing = target_frames - self._frames
-        if missing > 0:
-            self._wav.writeframes(b"\x00" * missing * self.frame_bytes)
-            self._frames += missing
+    def _pad(self, frames: int) -> None:
+        for chunk in silence_chunks(frames, self.frame_bytes):
+            self._wav.writeframes(chunk)
+        self._frames += max(0, frames)
+
+    def is_active(self) -> bool:
+        try:
+            return bool(self._stream.is_active())
+        except Exception:
+            return False
 
     def _callback(self, data, frame_count, _info, _status):
         import pyaudiowpatch as pyaudio
@@ -81,9 +110,7 @@ class _Track:
             if self._wav is None:
                 return (None, pyaudio.paComplete)
             expected_end = int((time.monotonic() - self._t0) * self.rate)
-            # se ficou para trás mais de 0,2 s, completa com silêncio antes deste bloco
-            if expected_end - frame_count - self._frames > self.rate // 5:
-                self._pad_to(expected_end - frame_count)
+            self._pad(frames_to_pad(expected_end, frame_count, self._frames, self.rate))
             self._wav.writeframes(data)
             self._frames += frame_count
         return (None, pyaudio.paContinue)
@@ -96,13 +123,17 @@ class _Track:
             pass
         with self._lock:
             if self._wav is not None:
-                self._pad_to(int((time.monotonic() - self._t0) * self.rate))
-                self._wav.close()
-                self._wav = None
+                try:
+                    expected_end = int((time.monotonic() - self._t0) * self.rate)
+                    self._pad(frames_to_pad(expected_end, 0, self._frames, self.rate))
+                finally:
+                    self._wav.close()
+                    self._wav = None
 
 
 class Recorder:
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, pa_factory=None):
+        self._pa_factory = pa_factory
         self._rec_dir = Path(work_dir) / "rec"
         self._pa = None
         self._tracks: list[_Track] = []
@@ -118,28 +149,43 @@ class Recorder:
         if self.active:
             return
         self._rec_dir.mkdir(parents=True, exist_ok=True)
-        self._pa = pyaudio.PyAudio()
-        wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-        loopback = self._pa.get_default_wasapi_loopback()
-        mic = self._pa.get_device_info_by_index(wasapi["defaultInputDevice"])
-        self._started_at = datetime.now()
-        stamp = self._started_at.strftime(_STAMP)
-        t0 = time.monotonic()
+        self._pa = (self._pa_factory or pyaudio.PyAudio)()
         try:
-            self._tracks = [
-                _Track(self._pa, loopback, self._rec_dir / f"{stamp}-system.wav", t0),
-                _Track(self._pa, mic, self._rec_dir / f"{stamp}-mic.wav", t0),
-            ]
+            wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+            loopback = self._pa.get_default_wasapi_loopback()
+            if wasapi["defaultInputDevice"] < 0:
+                raise OSError("nenhum microfone padrão")
+            mic = self._pa.get_device_info_by_index(wasapi["defaultInputDevice"])
+            self._started_at = datetime.now()
+            stamp = self._started_at.strftime(_STAMP)
+            t0 = time.monotonic()
+            system = _Track(self._pa, loopback, self._rec_dir / f"{stamp}-system.wav", t0)
+            self._tracks = [system]
+            try:
+                self._tracks.append(_Track(self._pa, mic, self._rec_dir / f"{stamp}-mic.wav", t0))
+            except Exception:
+                self.cancel()
+                raise
         except Exception:
             self._close_all()
             raise
 
+    def broken(self) -> bool:
+        """True se algum stream parou (ex.: fone desconectado no meio da reunião)."""
+        return self.active and not all(t.is_active() for t in self._tracks)
+
     def _close_all(self) -> list[_Track]:
         tracks, self._tracks = self._tracks, []
         for t in tracks:
-            t.close()
+            try:
+                t.close()
+            except Exception:
+                pass
         if self._pa is not None:
-            self._pa.terminate()
+            try:
+                self._pa.terminate()
+            except Exception:
+                pass
             self._pa = None
         return tracks
 

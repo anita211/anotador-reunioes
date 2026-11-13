@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
 from .config import Config
 from .output import read_transcript, write_meeting
 from .recorder import Recording
-from .summarizer import SummaryError, summarize
+from .summarizer import summarize
 from .transcriber import format_transcript, merge_tracks, transcribe_file
+
+
+log = logging.getLogger(__name__)
 
 
 def _pending_dir(cfg: Config) -> Path:
@@ -32,17 +36,22 @@ def process_recording(
     rec.system_wav.unlink(missing_ok=True)
     rec.mic_wav.unlink(missing_ok=True)
 
+    # marcador antes de chamar o Claude: se o PC desligar no meio, o resumo é refeito depois
+    pending = _pending_dir(cfg)
+    pending.mkdir(parents=True, exist_ok=True)
+    marker_path = pending / f"{path.stem}.json"
+    marker = {"md_path": str(path), "title": title, "started_at": rec.started_at.isoformat()}
+    marker_path.write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
+
     try:
         summary = summarize_fn(transcript, cfg.claude_cmd, cfg.claude_timeout_seconds)
-    except SummaryError:
-        pending = _pending_dir(cfg)
-        pending.mkdir(parents=True, exist_ok=True)
-        marker = {"md_path": str(path), "title": title, "started_at": rec.started_at.isoformat()}
-        (pending / f"{path.stem}.json").write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        log.exception("resumo falhou; fica pendente")
         notify(path, False)
         return path
 
     write_meeting(cfg.output_dir, rec.started_at, title, summary, transcript, path=path)
+    marker_path.unlink(missing_ok=True)
     notify(path, True)
     return path
 
@@ -66,7 +75,8 @@ def retry_pending(cfg: Config, summarize_fn=summarize) -> list[Path]:
         transcript = read_transcript(md)
         try:
             summary = summarize_fn(transcript, cfg.claude_cmd, cfg.claude_timeout_seconds)
-        except SummaryError:
+        except Exception:
+            log.exception("resumo pendente falhou de novo")
             continue
         started_at = datetime.fromisoformat(info["started_at"])
         write_meeting(md.parent, started_at, info.get("title"), summary, transcript, path=md)

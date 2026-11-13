@@ -113,3 +113,28 @@ def test_retry_pending_md_deleted_drops_marker(setup):
 def test_retry_pending_no_dir(tmp_path):
     cfg = replace(Config(), work_dir=tmp_path / "nada")
     assert retry_pending(cfg, summarize_fn=failing_summary) == []
+
+
+def test_marker_exists_while_summarizing_and_removed_after(setup):
+    cfg, rec = setup
+    seen = []
+
+    def summ(t, c, to):
+        seen.append(len(list((cfg.work_dir / "pending").glob("*.json"))))
+        return "## Resumo\nok"
+
+    process_recording(rec, None, cfg, transcribe=fake_transcribe, summarize_fn=summ)
+    assert seen == [1]
+    assert not list((cfg.work_dir / "pending").glob("*.json"))
+
+
+def test_unexpected_summary_error_keeps_marker(setup):
+    cfg, rec = setup
+
+    def boom(*a):
+        raise UnicodeDecodeError("utf-8", b"", 0, 1, "x")
+
+    notes = Notes()
+    path = process_recording(rec, None, cfg, transcribe=fake_transcribe, summarize_fn=boom, notify=notes)
+    assert len(list((cfg.work_dir / "pending").glob("*.json"))) == 1
+    assert notes.calls == [(path, False)]

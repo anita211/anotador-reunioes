@@ -56,7 +56,7 @@ def test_cancel_suppresses_restart_until_mic_off():
     assert d.recording is False
     assert d.update(3, True, "Meet - abc") is None
     assert d.update(6, False, None) is None
-    assert d.update(9, True, "Meet - abc") == "start"
+    assert d.update(9, True, "Meet - outra") == "start"
 
 
 def test_no_mic_no_start():
@@ -80,3 +80,70 @@ def test_after_stop_new_meeting_can_start():
     assert d.update(26, False, None) == "stop"
     assert d.update(30, True, "Meet - b") == "start"
     assert d.title == "Meet - b"
+
+
+def test_cancelled_meeting_never_restarts_after_mic_blip():
+    d = make()
+    d.update(0, True, "Meet - abc")
+    d.cancel()
+    assert d.update(3, False, None) is None          # trocou de microfone / caiu
+    assert d.update(6, True, "Meet - abc") is None   # mesma reunião: não grava, sem aviso
+    assert d.update(9, True, "Meet - abc") is None
+    assert d.recording is False
+
+
+def test_cancel_suppression_expires_after_3_hours():
+    d = make()
+    d.update(0, True, "Meet - abc")
+    d.cancel()
+    d.update(3, False, None)
+    assert d.update(3 * 3600 + 10, True, "Meet - abc") == "start"
+
+
+def test_force_stop_suppresses_same_meeting():
+    d = make()
+    d.update(0, True, "Meet - abc")
+    d.force_stop()
+    d.update(3, False, None)
+    assert d.update(6, True, "Meet - abc") is None
+
+
+def test_rejoin_same_meeting_after_stop_resumes_without_warning():
+    d = make()
+    d.update(0, True, "Meet - abc")
+    d.update(100, False, None)
+    assert d.update(120, False, None) == "stop"
+    assert d.update(300, True, "Meet - abc") == "resume"
+    assert d.recording is True
+
+
+def test_same_title_long_after_stop_is_new_start():
+    d = make()
+    d.update(0, True, "Meet - abc")
+    d.update(100, False, None)
+    assert d.update(120, False, None) == "stop"
+    assert d.update(120 + 11 * 60, True, "Meet - abc") == "start"
+
+
+def test_is_meet_call_title():
+    from anotador.detector import is_meet_call_title
+    assert is_meet_call_title("Meet - abc-defg-hij", "Meet")
+    assert is_meet_call_title("Meet – Alinhamento semanal", "Meet")
+    assert is_meet_call_title("Meet: Revisão", "Meet")
+    assert not is_meet_call_title("Google Meet", "Meet")
+    assert not is_meet_call_title("Meeting notes - Google Docs", "Meet")
+    assert not is_meet_call_title("meet - abc", "Meet")
+    assert not is_meet_call_title("Meet", "Meet")
+
+
+def test_mic_in_use_decision():
+    from anotador.detector import mic_in_use_from_entries
+    entries = [
+        ("C:#Program Files#Opera#opera.exe", 133, 0),
+        ("C:#Windows#other.exe", 133, 0),
+    ]
+    assert mic_in_use_from_entries(entries, "opera.exe", process_running=True)
+    assert not mic_in_use_from_entries(entries, "opera.exe", process_running=False)  # registro "travado"
+    assert not mic_in_use_from_entries([("x#opera.exe", 133, 140)], "opera.exe", True)
+    assert not mic_in_use_from_entries([("x#opera.exe", 0, 0)], "opera.exe", True)
+    assert not mic_in_use_from_entries([], "opera.exe", True)

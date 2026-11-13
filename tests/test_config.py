@@ -31,3 +31,9 @@ def test_default_output_dir_is_windows_documents_folder():
     buf = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
     ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf)  # CSIDL_PERSONAL
     assert Config().output_dir == Path(buf.value) / "Reuniões"
+
+
+def test_broken_json_falls_back_to_defaults(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text("{ isto não é json", encoding="utf-8")
+    assert load_config(p).browser_exe == "opera.exe"

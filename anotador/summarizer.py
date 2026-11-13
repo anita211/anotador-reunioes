@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 PROMPT = """Você recebe a transcrição de uma reunião em português. "Eu" é a dona destas anotações; "Outros" são os demais participantes.
@@ -37,13 +38,20 @@ def _resolve(cmd: str) -> str:
 def _ask(text: str, claude_cmd: str, timeout: float, run) -> str:
     try:
         result = run(
-            [_resolve(claude_cmd), "-p"],
+            [
+                _resolve(claude_cmd), "-p",
+                "--no-session-persistence",   # não guarda cópia da transcrição em ~/.claude
+                "--tools", "",                # só texto: a transcrição vem de terceiros
+                "--strict-mcp-config",        # sem servidores MCP
+                "--disable-slash-commands",
+            ],
             input=PROMPT + text,
             capture_output=True,
             text=True,
             encoding="utf-8",
             timeout=timeout,
             creationflags=_NO_WINDOW,
+            cwd=tempfile.gettempdir(),       # fora de qualquer projeto (sem CLAUDE.md)
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise SummaryError(str(e)) from e

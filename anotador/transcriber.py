@@ -29,7 +29,10 @@ def _model(name: str):
         if name not in _models:
             from faster_whisper import WhisperModel
 
-            _models[name] = WhisperModel(name, device="cpu", compute_type="int8")
+            import os
+
+            threads = max(2, (os.cpu_count() or 4) // 2)  # deixa CPU livre para a próxima reunião
+            _models[name] = WhisperModel(name, device="cpu", compute_type="int8", cpu_threads=threads)
         return _models[name]
 
 
@@ -62,16 +65,28 @@ def load_wav_16k_mono(path: Path):
     return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
 
 
+WINDOW_SECONDS = 600  # transcreve em janelas de 10 min para limitar o uso de memória
+
+
+def transcribe_array(audio, model, window_seconds: float = WINDOW_SECONDS) -> list[Segment]:
+    step = int(window_seconds * _TARGET_RATE)
+    out: list[Segment] = []
+    for begin in range(0, len(audio), step):
+        offset = begin / _TARGET_RATE
+        segments, _info = model.transcribe(audio[begin : begin + step], language="pt", vad_filter=True)
+        out.extend(
+            Segment(s.start + offset, s.end + offset, s.text)
+            for s in segments
+            if is_probably_speech(s.no_speech_prob, s.avg_logprob)
+        )
+    return out
+
+
 def transcribe_file(path: Path, model_name: str) -> list[Segment]:
     audio = load_wav_16k_mono(path)
     if len(audio) == 0:
         return []
-    segments, _info = _model(model_name).transcribe(audio, language="pt", vad_filter=True)
-    return [
-        Segment(s.start, s.end, s.text)
-        for s in segments
-        if is_probably_speech(s.no_speech_prob, s.avg_logprob)
-    ]
+    return transcribe_array(audio, _model(model_name))
 
 
 def is_probably_speech(no_speech_prob: float, avg_logprob: float) -> bool:

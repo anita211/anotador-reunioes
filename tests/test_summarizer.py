@@ -53,3 +53,13 @@ def test_long_transcript_chunks():
     transcript = line * (900_000 // len(line) + 1)
     summarize(transcript, "claude", 600, run=run)
     assert len(run.calls) == 4
+
+
+def test_runs_claude_isolated_and_without_persistence():
+    run = FakeRun()
+    summarize("x", "claude", 600, run=run)
+    args, kw = run.calls[0]
+    assert "--no-session-persistence" in args
+    assert args[args.index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in args
+    assert kw.get("cwd")

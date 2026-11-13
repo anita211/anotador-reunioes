@@ -14,6 +14,9 @@ from .detector import MeetingDetector, browser_mic_in_use, find_meet_title
 
 log = logging.getLogger("anotador")
 
+MAX_RECORDING_SECONDS = 4 * 3600  # abaixo do limite de 4 GiB do WAV a 48 kHz estéreo
+SLEEP_GAP_SECONDS = 60            # intervalo entre verificações maior que isso = notebook dormiu
+
 
 class Controller:
     """Liga detector, gravador e fila de processamento. Seguro para chamar de várias threads."""
@@ -27,21 +30,40 @@ class Controller:
         self._mic_probe = mic_probe
         self._title_probe = title_probe
         self._lock = threading.RLock()
+        self._last_tick: float | None = None
+        self._rec_started = 0.0
 
     def tick(self, now: float) -> None:
+        slept = self._last_tick is not None and now - self._last_tick > SLEEP_GAP_SECONDS
+        self._last_tick = now
+        with self._lock:
+            if self.recorder.active:
+                if slept or now - self._rec_started > MAX_RECORDING_SECONDS:
+                    log.info("gravação encerrada (%s)", "suspensão" if slept else "limite de duração")
+                    title = self.detector.title
+                    self.detector.interrupt(now)
+                    self._stop_and_enqueue(title)
+                elif self.recorder.broken():
+                    log.warning("dispositivo de áudio caiu; reabrindo no dispositivo atual")
+                    self._stop_and_enqueue(self.detector.title)
+                    if not self._start_recorder(now):
+                        self.detector.interrupt(now)
         mic = self._mic_probe(self.cfg.browser_exe)
         title = self._title_probe(self.cfg.browser_exe, self.cfg.title_keyword) if mic else None
         with self._lock:
             event = self.detector.update(now, mic, title)
             if event == "start":
-                if self._start_recorder():
+                if self._start_recorder(now):
                     self._warn(self.cancel_current, self.cfg.warning_seconds)
+            elif event == "resume":
+                self._start_recorder(now)
             elif event == "stop":
                 self._stop_and_enqueue(self.detector.title)
 
-    def _start_recorder(self) -> bool:
+    def _start_recorder(self, now: float) -> bool:
         try:
             self.recorder.start()
+            self._rec_started = now
             log.info("gravação iniciada")
             return True
         except Exception:
@@ -68,7 +90,7 @@ class Controller:
             if self.recorder.active:
                 return
             self.detector.force_start(now)
-            self._start_recorder()
+            self._start_recorder(now)
 
     def manual_stop(self) -> None:
         with self._lock:
@@ -147,8 +169,8 @@ def _poller(controller: Controller, stop: threading.Event) -> None:
 def main() -> None:
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     defaults = Config()
+    _setup_logging(defaults.work_dir)
     cfg = load_config(defaults.work_dir / "config.json")
-    _setup_logging(cfg.work_dir)
 
     mutex = _single_instance()
     if mutex is None:

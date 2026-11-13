@@ -86,3 +86,34 @@ def test_is_probably_speech_filters_hallucinations():
     assert is_probably_speech(no_speech_prob=0.1, avg_logprob=-0.3)
     assert not is_probably_speech(no_speech_prob=0.8, avg_logprob=-0.3)
     assert not is_probably_speech(no_speech_prob=0.1, avg_logprob=-1.5)
+
+
+class _Seg:
+    def __init__(self, start, end, text, nsp=0.1, lp=-0.2):
+        self.start, self.end, self.text, self.no_speech_prob, self.avg_logprob = start, end, text, nsp, lp
+
+
+class _FakeModel:
+    def __init__(self):
+        self.lengths = []
+
+    def transcribe(self, audio, **kw):
+        self.lengths.append(len(audio))
+        return iter([_Seg(1.0, 2.0, f"parte {len(self.lengths)}"), _Seg(3, 4, "ruído", nsp=0.9)]), None
+
+
+def test_transcribe_array_in_windows_with_offsets():
+    import numpy as np
+    from anotador.transcriber import transcribe_array
+    m = _FakeModel()
+    audio = np.zeros(16000 * 25, dtype=np.float32)
+    segs = transcribe_array(audio, m, window_seconds=10)
+    assert m.lengths == [160000, 160000, 80000]
+    assert [s.start for s in segs] == [1.0, 11.0, 21.0]
+    assert [s.text for s in segs] == ["parte 1", "parte 2", "parte 3"]
+
+
+def test_transcribe_array_empty():
+    import numpy as np
+    from anotador.transcriber import transcribe_array
+    assert transcribe_array(np.zeros(0, dtype=np.float32), _FakeModel(), 10) == []

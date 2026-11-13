@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -49,7 +50,13 @@ def load_config(path: Path | None) -> Config:
     cfg = Config()
     if path is None or not Path(path).exists():
         return cfg
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("config deve ser um objeto JSON")
+    except (OSError, ValueError) as e:
+        logging.getLogger(__name__).warning("config.json inválido (%s); usando padrões", e)
+        return cfg
     known = {f.name for f in fields(Config)}
     updates = {}
     for key, value in data.items():

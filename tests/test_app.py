@@ -13,11 +13,17 @@ class FakeRecorder:
         self.active = False
         self.fail = fail
         self.cancelled = 0
+        self.starts = 0
+        self.is_broken = False
+
+    def broken(self):
+        return self.is_broken
 
     def start(self):
         if self.fail:
             raise OSError("sem dispositivo")
         self.active = True
+        self.starts += 1
 
     def stop(self):
         self.active = False
@@ -101,3 +107,67 @@ def test_manual_start_and_stop():
     c.manual_stop()
     assert not c.recorder.active
     assert q.get_nowait()[1] is None
+
+
+def test_resume_same_meeting_records_without_warning():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    probe.mic, probe.title = False, None
+    c.tick(10); c.tick(26)
+    q.get_nowait()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(60)
+    assert c.recorder.active
+    assert len(warns) == 1
+
+
+def test_sleep_gap_stops_and_enqueues():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    c.tick(3)
+    probe.mic, probe.title = False, None   # ao acordar, a chamada já caiu
+    c.tick(3 + 3600)  # notebook dormiu
+    assert q.get_nowait()[1] == "Meet - abc"
+    assert not c.recorder.active
+
+
+def test_wake_still_in_call_resumes_without_warning():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    c.tick(3 + 600)
+    assert q.get_nowait()[1] == "Meet - abc"
+    assert c.recorder.active and len(warns) == 1
+
+
+def test_max_duration_stops_and_enqueues():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    t = 0
+    while t <= 4 * 3600 + 6:
+        c.tick(t)
+        t += 3
+    assert not q.empty()
+
+
+def test_manual_recording_also_capped():
+    c, probe, warns, q = make()
+    c.manual_start(0)
+    t = 3
+    while t <= 4 * 3600 + 6:
+        c.tick(t)
+        t += 3
+    assert not c.recorder.active and not q.empty()
+
+
+def test_broken_recorder_restarts_without_warning():
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    c.recorder.is_broken = True
+    c.tick(3)
+    assert q.get_nowait()[1] == "Meet - abc"
+    assert c.recorder.active and c.recorder.starts == 2
+    assert len(warns) == 1
