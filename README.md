@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎙️ Anotador de Reuniões
+# 🎙️ Meeting Notetaker
 
 **Private, bot-free meeting notes for Google Meet, made on your own Windows PC.**
 
