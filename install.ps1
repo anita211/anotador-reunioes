@@ -4,12 +4,16 @@ $root = $PSScriptRoot
 $venvPy = Join-Path $root '.venv\Scripts\python.exe'
 $venvPyw = Join-Path $root '.venv\Scripts\pythonw.exe'
 
+# Usa o "venv" padrao do Python: o pythonw.exe dele abre o programa sem janela de terminal.
+# (O "uv venv" cria um pythonw.exe que abre uma janela de console, e fechar essa janela encerra o app.)
 if (-not (Test-Path $venvPy)) {
     if (Get-Command uv -ErrorAction SilentlyContinue) {
-        uv venv --python 3.12 (Join-Path $root '.venv')
+        uv python install 3.12
+        $basePy = (uv python find --system 3.12).Trim()
     } else {
-        py -3.12 -m venv (Join-Path $root '.venv')
+        $basePy = (py -3.12 -c "import sys; print(sys.executable)").Trim()
     }
+    & $basePy -m venv (Join-Path $root '.venv')
 }
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     uv pip install --python $venvPy -r (Join-Path $root 'requirements.txt')
