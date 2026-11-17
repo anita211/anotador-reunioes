@@ -27,7 +27,12 @@ def process_recording(
     transcribe=transcribe_file,
     summarize_fn=summarize,
     notify=lambda path, ok: None,
+    on_start=lambda rec, title: None,
 ) -> Path:
+    try:
+        on_start(rec, title)
+    except Exception:
+        log.exception("falha no aviso de início do processamento")
     me = transcribe(rec.mic_wav, cfg.whisper_model)
     others = transcribe(rec.system_wav, cfg.whisper_model)
     transcript = format_transcript(merge_tracks(me, others))

@@ -138,3 +138,18 @@ def test_unexpected_summary_error_keeps_marker(setup):
     path = process_recording(rec, None, cfg, transcribe=fake_transcribe, summarize_fn=boom, notify=notes)
     assert len(list((cfg.work_dir / "pending").glob("*.json"))) == 1
     assert notes.calls == [(path, False)]
+
+
+def test_on_start_called_before_transcription(setup):
+    cfg, rec = setup
+    events = []
+
+    def transcribe(path, model):
+        events.append("transcribe")
+        return fake_transcribe(path, model)
+
+    process_recording(rec, "Meet - abc", cfg, transcribe=transcribe,
+                      summarize_fn=lambda t, c, to: "## Resumo\nok",
+                      on_start=lambda r, title: events.append(("start", title)))
+    assert events[0] == ("start", "Meet - abc")
+    assert events.count("transcribe") == 2

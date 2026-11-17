@@ -150,7 +150,7 @@ def _icon_image():
 
 def _worker(cfg: Config, jobs: queue.Queue) -> None:
     from .pipeline import process_recording, retry_pending
-    from .ui import notify_silent
+    from .ui import notify_processing_started, notify_silent
 
     try:
         for path in retry_pending(cfg):
@@ -160,7 +160,9 @@ def _worker(cfg: Config, jobs: queue.Queue) -> None:
     while True:
         rec, title = jobs.get()
         try:
-            path = process_recording(rec, title, cfg, notify=notify_silent)
+            path = process_recording(
+                rec, title, cfg, notify=notify_silent, on_start=notify_processing_started
+            )
             log.info("reunião salva: %s", path)
         except Exception:
             log.exception("erro ao processar %s", rec.mic_wav)

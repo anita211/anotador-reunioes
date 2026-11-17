@@ -80,3 +80,22 @@ def notify_silent(md_path: Path, ok: bool) -> None:
     except Exception:
         # Sem pop-up é a regra; se a notificação silenciosa falhar, simplesmente não notifica.
         log.exception("falha na notificação silenciosa")
+
+
+def notify_processing_started(rec, title) -> None:
+    """Aviso visível (a reunião acabou): gravação encerrada, transcrição começando."""
+    try:
+        from datetime import datetime
+
+        from windows_toasts import Toast, ToastAudio, WindowsToaster
+
+        from .output import clean_title
+
+        minutes = max(1, round((datetime.now() - rec.started_at).total_seconds() / 60))
+        toast = Toast(
+            ["Gravação encerrada", f"{clean_title(title)} · {minutes} min — transcrevendo…"],
+            audio=ToastAudio(silent=True),
+        )
+        WindowsToaster("Anotador de Reuniões").show_toast(toast)
+    except Exception:
+        log.exception("falha no aviso de processamento")
