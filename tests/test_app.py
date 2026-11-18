@@ -52,6 +52,7 @@ class Probe:
 def make(tmp_path):
     def _make(fail=False):
         probe, warns, q = Probe(), [], queue.Queue()
+        ended = []
         c = Controller(
             Config(),
             MeetingDetector(30, 15),
@@ -61,7 +62,9 @@ def make(tmp_path):
             mic_probe=lambda exe: probe.mic,
             title_probe=lambda exe, kw: probe.title,
             render_probe=lambda exe: probe.render,
+            ended=lambda title, started_at: ended.append((title, started_at)),
         )
+        c.ended_calls = ended
         return c, probe, warns, q
     return _make
 
@@ -272,6 +275,43 @@ def test_toggle_during_auto_recording_stops_and_releases(make):
     c.toggle_manual(5)
     assert not c.recorder.active
     assert q.get_nowait()[1] == "Meet - abc"
+
+
+def test_ended_notice_fires_immediately_when_recording_stops(make):
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    probe.mic, probe.title = False, None
+    c.tick(10)
+    assert c.ended_calls == []
+    c.tick(26)  # parou: avisa na hora, sem esperar os 2 min
+    assert len(c.ended_calls) == 1 and c.ended_calls[0][0] == "Meet - abc"
+    assert q.empty()
+
+
+def test_ended_notice_not_fired_on_device_reopen(make):
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    c.recorder.is_broken = True
+    c.tick(3)
+    assert c.ended_calls == []
+
+
+def test_ended_notice_on_manual_stop(make):
+    c, probe, warns, q = make()
+    c.manual_start(0)
+    c.manual_stop()
+    assert len(c.ended_calls) == 1
+
+
+def test_ended_notice_not_fired_on_cancel(make):
+    c, probe, warns, q = make()
+    probe.mic, probe.title = True, "Meet - abc"
+    c.tick(0)
+    warns[0][0]()
+    run(c, 3, 60)
+    assert c.ended_calls == []
 
 
 def test_app_loads_whisper_runtime_before_toast_library():

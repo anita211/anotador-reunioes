@@ -82,8 +82,8 @@ def notify_silent(md_path: Path, ok: bool) -> None:
         log.exception("falha na notificação silenciosa")
 
 
-def notify_processing_started(rec, title) -> None:
-    """Aviso visível (a reunião acabou): gravação encerrada, transcrição começando."""
+def notify_recording_ended(title, started_at) -> None:
+    """Aviso visível assim que a gravação para (a reunião acabou)."""
     try:
         from datetime import datetime
 
@@ -91,11 +91,11 @@ def notify_processing_started(rec, title) -> None:
 
         from .output import clean_title
 
-        minutes = max(1, round((datetime.now() - rec.started_at).total_seconds() / 60))
+        minutes = max(1, round((datetime.now() - started_at).total_seconds() / 60))
         toast = Toast(
-            ["Gravação encerrada", f"{clean_title(title)} · {minutes} min — transcrevendo…"],
+            ["Gravação encerrada", f"{clean_title(title)} · {minutes} min — a transcrição começa em 2 min"],
             audio=ToastAudio(silent=True),
         )
         WindowsToaster("Anotador de Reuniões").show_toast(toast)
     except Exception:
-        log.exception("falha no aviso de processamento")
+        log.exception("falha no aviso de fim da gravação")

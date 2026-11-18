@@ -33,7 +33,8 @@ class Controller:
     """
 
     def __init__(self, cfg: Config, detector, recorder, jobs: queue.Queue, warn,
-                 mic_probe, title_probe, render_probe=lambda exe: False):
+                 mic_probe, title_probe, render_probe=lambda exe: False,
+                 ended=lambda title, started_at: None):
         self.cfg = cfg
         self.detector = detector
         self.recorder = recorder
@@ -42,6 +43,7 @@ class Controller:
         self._mic_probe = mic_probe
         self._title_probe = title_probe
         self._render_probe = render_probe
+        self._ended = ended
         self._lock = threading.RLock()
         self._last_tick: float | None = None
         self._rec_started = 0.0
@@ -93,6 +95,7 @@ class Controller:
                 self._remember_title(self.detector.title)
                 self._stop_part()
                 self._held_since = now
+                self._notify_ended()
 
     # --- partes e trabalhos --------------------------------------------------
 
@@ -117,6 +120,14 @@ class Controller:
         rec = self.recorder.stop()
         log.info("parte gravada: %s", rec.mic_wav.name)
         self._parts.append(rec)
+
+    def _notify_ended(self) -> None:
+        if not self._parts:
+            return
+        try:
+            self._ended(self._job_title, self._parts[0].started_at)
+        except Exception:
+            log.exception("falha no aviso de fim da gravação")
 
     def _release_job(self) -> None:
         if self._parts:
@@ -162,6 +173,7 @@ class Controller:
             self._remember_title(self.detector.title)
             self.detector.force_stop()
             self._stop_part()
+            self._notify_ended()
             self._release_job()
 
     def shutdown(self) -> None:
@@ -207,7 +219,7 @@ def _icon_image():
 
 def _worker(cfg: Config, jobs: queue.Queue) -> None:
     from .pipeline import process_job, retry_pending
-    from .ui import notify_processing_started, notify_silent
+    from .ui import notify_silent
 
     try:
         for path in retry_pending(cfg):
@@ -218,7 +230,7 @@ def _worker(cfg: Config, jobs: queue.Queue) -> None:
         parts, title = jobs.get()
         try:
             path = process_job(
-                parts, title, cfg, notify=notify_silent, on_start=notify_processing_started
+                parts, title, cfg, notify=notify_silent
             )
             if path:
                 log.info("reunião salva: %s", path)
@@ -249,7 +261,7 @@ def main() -> None:
     import pystray
 
     from .recorder import Recorder, find_leftover_recordings
-    from .ui import show_recording_warning
+    from .ui import notify_recording_ended, show_recording_warning
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     jobs: queue.Queue = queue.Queue()
@@ -266,6 +278,7 @@ def main() -> None:
         mic_probe=browser_mic_in_use,
         title_probe=find_meet_title,
         render_probe=browser_playing_audio,
+        ended=notify_recording_ended,
     )
     stop = threading.Event()
     threading.Thread(target=_worker, args=(cfg, jobs), daemon=True).start()
