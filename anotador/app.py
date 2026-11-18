@@ -9,6 +9,11 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+# Carregar o runtime do Whisper ANTES de qualquer uso de windows_toasts/winrt:
+# o pacote winrt traz um MSVCP140.dll antigo e, se ele for carregado primeiro,
+# o ctranslate2 derruba o processo (0xc0000005) ao transcrever.
+import ctranslate2  # noqa: F401,E402
+
 from .config import Config, load_config
 from .detector import MeetingDetector, browser_mic_in_use, find_meet_title
 

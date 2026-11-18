@@ -188,3 +188,15 @@ def test_toggle_during_auto_recording_stops_it():
     c.toggle_manual(5)
     assert not c.recorder.active
     assert q.get_nowait()[1] == "Meet - abc"
+
+
+def test_app_loads_whisper_runtime_before_toast_library():
+    # winrt (avisos) traz um MSVCP140.dll antigo; se ele carregar antes do
+    # ctranslate2 (Whisper), o processo fecha sozinho ao transcrever.
+    import subprocess, sys
+    code = (
+        "import sys, anotador.app; "
+        "print('ctranslate2' in sys.modules, 'winrt' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.split() == ["True", "False"]
