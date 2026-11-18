@@ -31,10 +31,10 @@
 |  |  |
 |---|---|
 | 🤫 **No bot in the call** | Nothing joins the meeting. It captures the audio your own computer already plays and hears. |
-| 🪄 **Starts by itself** | It notices when Opera opens your microphone on a `Meet - …` tab and starts recording. |
+| 🪄 **Starts by itself** | It asks the Windows audio system when Opera opens your microphone on a `Meet - …` tab, and starts recording. |
 | 🔒 **Audio stays on your PC** | Speech-to-text runs locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). The WAV files are deleted once the transcript is saved. |
 | 🧠 **Smart summaries** | The transcript text goes to the `claude` CLI and comes back as Summary · Decisions · Action items · Open questions, in Portuguese. |
-| 🙈 **Screen-share friendly** | One small popup that you can dismiss and that never comes back during the same meeting. The "ready" notice goes quietly to the Action Center. |
+| 🙈 **Screen-share friendly** | One small popup that you can dismiss and that never comes back during the same meeting. A "Gravação encerrada" notice appears when the call ends; the "ready" notice goes quietly to the Action Center. |
 | 🛟 **Hard to lose a meeting** | Recordings survive crashes, laptop sleep and offline moments. Pending summaries are retried automatically. |
 
 <br>
@@ -44,7 +44,7 @@
 ```mermaid
 flowchart LR
     A["🎧 Opera opens the mic<br/>on a Meet tab"] --> B["⏺️ Record two tracks<br/>system audio + mic"]
-    B --> C["🚪 Call ends<br/>(mic released for 15 s)"]
+    B --> C["🚪 Call ends<br/>(no mic or call audio for 15 s)"]
     C --> D["📝 Whisper transcribes<br/>locally, on CPU"]
     D --> E["✨ Claude summarizes<br/>text only"]
     E --> F["📄 Markdown note in<br/>Documents/Reuniões"]
@@ -105,7 +105,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 The installer:
 
-1. 🐍 creates a `.venv` with Python 3.12 and installs the dependencies;
+1. 🐍 creates a `.venv` with Python 3.12 (standard `venv`, so `pythonw.exe` opens no console window) and installs the dependencies;
 2. ⚙️ copies `config.example.json` to `%LOCALAPPDATA%\AnotadorReunioes\config.json`;
 3. 🚀 adds a shortcut to the Windows **Startup** folder, so the app launches at login without a console window;
 4. ▶️ starts the app right away.
@@ -124,7 +124,8 @@ A small grey note icon lives in the system tray, next to the clock.
 | **Join a Meet call in Opera** | Recording starts within a few seconds and a **● Gravando reunião** popup appears. |
 | **Click OK** (or wait 15 s) | The popup closes and doesn't return during that meeting. |
 | **Click "Cancelar gravação"** | The audio is discarded, and that meeting won't be recorded again for the next 3 hours. |
-| **Leave the call** | About 15 s later the recording stops. Transcription and the summary run in the background. |
+| **Mute yourself** | Recording continues while Opera is playing the call audio. |
+| **Leave the call** | About 15 s later the recording stops and a **Gravação encerrada** notice appears. Two minutes later transcription and the summary start in the background. |
 | **Left-click the tray icon** | Starts or stops a **manual** recording, for any audio source. |
 | **Right-click the tray icon** | Opens the menu: start/stop recording · open the meetings folder · quit. |
 
@@ -174,12 +175,15 @@ Logs are written to `%LOCALAPPDATA%\AnotadorReunioes\anotador.log`.
 | Situation | Behaviour |
 |---|---|
 | You drop and rejoin within 15 s | It stays one continuous recording. |
-| You rejoin the same meeting within 10 min | Recording resumes **without** a popup, in a new file. |
-| The laptop sleeps mid-call | The recording is closed and processed. If you're still in the call after waking, it resumes quietly. |
-| The audio device is unplugged | The current part is saved and recording reopens on the new default device. |
+| You rejoin the same meeting within 2 min | Recording resumes **without** a popup, and all parts become **one note**. |
+| You rejoin the same meeting within 10 min | Recording resumes without a popup, in a new note. |
+| The laptop sleeps mid-call | The part is saved. If you're still in the call after waking, recording resumes quietly into the same note. |
+| The audio device is unplugged | Recording reopens on the new default device; both parts end up in the same note. |
+| You click **Cancelar gravação** | Every part of that meeting is discarded. |
+| A recording shorter than 10 s | It is discarded without creating a note. |
 | No internet or Claude fails | The transcript is saved as `_Resumo pendente_` and the summary is retried at next start. |
 | The app crashes or you quit while recording | The WAVs are picked up and processed at next start. |
-| A very long call | Recording is capped at 4 h per file, and transcription runs in 10-minute windows to keep memory low. |
+| A very long call | Audio files are split every 4 h (still one note), and transcription runs in 10-minute windows to keep memory low. |
 
 <br>
 
