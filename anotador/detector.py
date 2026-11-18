@@ -146,8 +146,8 @@ def _pid_image(pid: int) -> str | None:
         win32api.CloseHandle(handle)
 
 
-def _capture_sessions() -> list[tuple[str, int]]:
-    """Sessões de áudio de captura (microfones) segundo o sistema de áudio do Windows."""
+def _capture_sessions(flow: str = "capture") -> list[tuple[str, int]]:
+    """Sessões de áudio do Windows: "capture" (microfones) ou "render" (alto-falantes/fones)."""
     import comtypes
     from comtypes import CLSCTX_ALL
     from pycaw.constants import DEVICE_STATE, EDataFlow
@@ -159,7 +159,8 @@ def _capture_sessions() -> list[tuple[str, int]]:
         pass  # já inicializado nesta thread
     out = []
     devices = AudioUtilities.GetDeviceEnumerator().EnumAudioEndpoints(
-        EDataFlow.eCapture.value, DEVICE_STATE.ACTIVE.value
+        (EDataFlow.eRender if flow == "render" else EDataFlow.eCapture).value,
+        DEVICE_STATE.ACTIVE.value,
     )
     for i in range(devices.GetCount()):
         try:
@@ -178,6 +179,11 @@ def _capture_sessions() -> list[tuple[str, int]]:
 def browser_mic_in_use(exe_name: str) -> bool:
     """True se o navegador tem uma sessão de microfone ativa agora."""
     return mic_active_from_sessions(_capture_sessions(), exe_name)
+
+
+def browser_playing_audio(exe_name: str) -> bool:
+    """True se o navegador está tocando áudio agora (ex.: a chamada, mesmo com você muda)."""
+    return mic_active_from_sessions(_capture_sessions("render"), exe_name)
 
 
 def _process_image_name(hwnd: int) -> str | None:

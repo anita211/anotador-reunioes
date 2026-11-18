@@ -153,3 +153,43 @@ def test_on_start_called_before_transcription(setup):
                       on_start=lambda r, title: events.append(("start", title)))
     assert events[0] == ("start", "Meet - abc")
     assert events.count("transcribe") == 2
+
+
+def _part(folder, name, started_at):
+    r = Recording(folder / f"{name}-system.wav", folder / f"{name}-mic.wav", started_at)
+    r.system_wav.write_bytes(b"")
+    r.mic_wav.write_bytes(b"")
+    return r
+
+
+def test_job_merges_parts_with_time_offsets(setup):
+    from anotador.pipeline import process_job
+    cfg, _ = setup
+    folder = cfg.work_dir / "rec"
+    a = _part(folder, "a", datetime(2026, 11, 16, 15, 39, 0))
+    b = _part(folder, "b", datetime(2026, 11, 16, 15, 40, 0))
+
+    def transcribe(path, model):
+        return [Segment(5, 6, "oi")] if "mic" in path.name else []
+
+    path = process_job([a, b], "Meet - PCB", cfg, transcribe=transcribe,
+                       summarize_fn=lambda t, c, to: "## Resumo\nok", duration_fn=lambda p: 60.0)
+    text = path.read_text(encoding="utf-8")
+    assert "[00:00:05] Eu: oi" in text and "[00:01:05] Eu: oi" in text
+    assert "_16/11/2026 15:39_" in text
+    assert path.name.startswith("2026-11-16 15h39 - PCB")
+    assert not any(p.exists() for r in (a, b) for p in (r.mic_wav, r.system_wav))
+
+
+def test_tiny_job_is_dropped_without_note(setup):
+    from anotador.pipeline import process_job
+    cfg, rec = setup
+    calls = []
+    result = process_job([rec], "Meet - x", cfg, transcribe=fake_transcribe,
+                         summarize_fn=lambda t, c, to: "x",
+                         notify=lambda p, ok: calls.append("notify"),
+                         on_start=lambda r, t: calls.append("start"),
+                         duration_fn=lambda p: 3.0)
+    assert result is None and calls == []
+    assert not rec.mic_wav.exists() and not rec.system_wav.exists()
+    assert not cfg.output_dir.exists() or not list(cfg.output_dir.glob("*.md"))

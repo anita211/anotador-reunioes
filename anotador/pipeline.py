@@ -10,7 +10,7 @@ from .config import Config
 from .output import read_transcript, write_meeting
 from .recorder import Recording
 from .summarizer import summarize
-from .transcriber import format_transcript, merge_tracks, transcribe_file
+from .transcriber import Segment, format_transcript, merge_tracks, transcribe_file
 
 
 log = logging.getLogger(__name__)
@@ -20,32 +20,70 @@ def _pending_dir(cfg: Config) -> Path:
     return Path(cfg.work_dir) / "pending"
 
 
-def process_recording(
-    rec: Recording,
+MIN_JOB_SECONDS = 10  # menos que isso (ex.: pedaço de 3 s) não vira nota
+
+
+def _wav_seconds(path: Path) -> float | None:
+    import wave
+
+    try:
+        with wave.open(str(path), "rb") as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:
+        return None
+
+
+def _delete_audio(parts: list[Recording]) -> None:
+    for rec in parts:
+        rec.system_wav.unlink(missing_ok=True)
+        rec.mic_wav.unlink(missing_ok=True)
+
+
+def _shift(segments: list[Segment], offset: float) -> list[Segment]:
+    return [Segment(s.start + offset, s.end + offset, s.text) for s in segments]
+
+
+def process_recording(rec: Recording, title: str | None, cfg: Config, **kwargs) -> Path | None:
+    return process_job([rec], title, cfg, **kwargs)
+
+
+def process_job(
+    parts: list[Recording],
     title: str | None,
     cfg: Config,
     transcribe=transcribe_file,
     summarize_fn=summarize,
     notify=lambda path, ok: None,
     on_start=lambda rec, title: None,
-) -> Path:
+    duration_fn=_wav_seconds,
+) -> Path | None:
+    """Uma reunião = uma nota, mesmo que tenha sido gravada em várias partes."""
+    first = parts[0]
+    durations = [duration_fn(p.mic_wav) for p in parts]
+    if all(d is not None for d in durations) and sum(durations) < MIN_JOB_SECONDS:
+        log.info("gravação muito curta (%.1f s); descartada", sum(durations))
+        _delete_audio(parts)
+        return None
     try:
-        on_start(rec, title)
+        on_start(first, title)
     except Exception:
         log.exception("falha no aviso de início do processamento")
-    me = transcribe(rec.mic_wav, cfg.whisper_model)
-    others = transcribe(rec.system_wav, cfg.whisper_model)
+    me: list[Segment] = []
+    others: list[Segment] = []
+    for rec in parts:
+        offset = (rec.started_at - first.started_at).total_seconds()
+        me += _shift(transcribe(rec.mic_wav, cfg.whisper_model), offset)
+        others += _shift(transcribe(rec.system_wav, cfg.whisper_model), offset)
     transcript = format_transcript(merge_tracks(me, others))
 
-    path = write_meeting(cfg.output_dir, rec.started_at, title, None, transcript)
-    rec.system_wav.unlink(missing_ok=True)
-    rec.mic_wav.unlink(missing_ok=True)
+    path = write_meeting(cfg.output_dir, first.started_at, title, None, transcript)
+    _delete_audio(parts)
 
     # marcador antes de chamar o Claude: se o PC desligar no meio, o resumo é refeito depois
     pending = _pending_dir(cfg)
     pending.mkdir(parents=True, exist_ok=True)
     marker_path = pending / f"{path.stem}.json"
-    marker = {"md_path": str(path), "title": title, "started_at": rec.started_at.isoformat()}
+    marker = {"md_path": str(path), "title": title, "started_at": first.started_at.isoformat()}
     marker_path.write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
 
     try:
@@ -55,7 +93,7 @@ def process_recording(
         notify(path, False)
         return path
 
-    write_meeting(cfg.output_dir, rec.started_at, title, summary, transcript, path=path)
+    write_meeting(cfg.output_dir, first.started_at, title, summary, transcript, path=path)
     marker_path.unlink(missing_ok=True)
     notify(path, True)
     return path

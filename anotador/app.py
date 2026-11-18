@@ -15,18 +15,25 @@ from pathlib import Path
 import ctranslate2  # noqa: F401,E402
 
 from .config import Config, load_config
-from .detector import MeetingDetector, browser_mic_in_use, find_meet_title
+from .detector import MeetingDetector, browser_mic_in_use, browser_playing_audio, find_meet_title
 
 log = logging.getLogger("anotador")
 
 MAX_RECORDING_SECONDS = 4 * 3600  # abaixo do limite de 4 GiB do WAV a 48 kHz estéreo
 SLEEP_GAP_SECONDS = 60            # intervalo entre verificações maior que isso = notebook dormiu
+HOLD_SECONDS = 120                # espera após o fim antes de processar: se voltar, é a mesma reunião
 
 
 class Controller:
-    """Liga detector, gravador e fila de processamento. Seguro para chamar de várias threads."""
+    """Liga detector, gravador e fila de processamento. Seguro para chamar de várias threads.
 
-    def __init__(self, cfg: Config, detector, recorder, jobs: queue.Queue, warn, mic_probe, title_probe):
+    Uma reunião pode ter várias partes (queda rápida, dispositivo que reabre, suspensão).
+    As partes ficam juntas em `_parts` e só vão para a fila como um único trabalho
+    `(partes, título)` quando a reunião realmente termina.
+    """
+
+    def __init__(self, cfg: Config, detector, recorder, jobs: queue.Queue, warn,
+                 mic_probe, title_probe, render_probe=lambda exe: False):
         self.cfg = cfg
         self.detector = detector
         self.recorder = recorder
@@ -34,9 +41,15 @@ class Controller:
         self._warn = warn
         self._mic_probe = mic_probe
         self._title_probe = title_probe
+        self._render_probe = render_probe
         self._lock = threading.RLock()
         self._last_tick: float | None = None
         self._rec_started = 0.0
+        self._parts: list = []
+        self._job_title: str | None = None
+        self._held_since: float | None = None
+
+    # --- ciclo ---------------------------------------------------------------
 
     def tick(self, now: float) -> None:
         slept = self._last_tick is not None and now - self._last_tick > SLEEP_GAP_SECONDS
@@ -44,26 +57,48 @@ class Controller:
         with self._lock:
             if self.recorder.active:
                 if slept or now - self._rec_started > MAX_RECORDING_SECONDS:
-                    log.info("gravação encerrada (%s)", "suspensão" if slept else "limite de duração")
-                    title = self.detector.title
+                    log.info("gravação pausada (%s)", "suspensão" if slept else "limite de duração")
+                    self._remember_title(self.detector.title)
                     self.detector.interrupt(now)
-                    self._stop_and_enqueue(title)
+                    self._stop_part()
+                    self._held_since = now
                 elif self.recorder.broken():
                     log.warning("dispositivo de áudio caiu; reabrindo no dispositivo atual")
-                    self._stop_and_enqueue(self.detector.title)
+                    self._stop_part()
                     if not self._start_recorder(now):
                         self.detector.interrupt(now)
+                        self._held_since = now
+            if self._held_since is not None and now - self._held_since > HOLD_SECONDS:
+                self._release_job()
+
         mic = self._mic_probe(self.cfg.browser_exe)
         title = self._title_probe(self.cfg.browser_exe, self.cfg.title_keyword) if mic else None
         with self._lock:
-            event = self.detector.update(now, mic, title)
+            in_call = mic
+            if self.detector.recording and not mic:
+                # mudo no Meet pode soltar o microfone; a chamada continua enquanto o
+                # navegador estiver tocando o áudio dos outros
+                in_call = self._render_probe(self.cfg.browser_exe)
+            event = self.detector.update(now, in_call, title)
             if event == "start":
+                self._release_job()  # outra reunião: a anterior já pode ser processada
                 if self._start_recorder(now):
+                    self._remember_title(self.detector.title)
                     self._warn(self.cancel_current, self.cfg.warning_seconds)
             elif event == "resume":
-                self._start_recorder(now)
+                if self._start_recorder(now):
+                    self._remember_title(self.detector.title)
+                    self._held_since = None
             elif event == "stop":
-                self._stop_and_enqueue(self.detector.title)
+                self._remember_title(self.detector.title)
+                self._stop_part()
+                self._held_since = now
+
+    # --- partes e trabalhos --------------------------------------------------
+
+    def _remember_title(self, title: str | None) -> None:
+        if title and not self._job_title:
+            self._job_title = title
 
     def _start_recorder(self, now: float) -> bool:
         try:
@@ -76,24 +111,40 @@ class Controller:
             self.detector.cancel()
             return False
 
-    def _stop_and_enqueue(self, title: str | None) -> None:
+    def _stop_part(self) -> None:
         if not self.recorder.active:
             return
         rec = self.recorder.stop()
-        log.info("gravação encerrada: %s", rec.mic_wav.name)
-        self.jobs.put((rec, title))
+        log.info("parte gravada: %s", rec.mic_wav.name)
+        self._parts.append(rec)
+
+    def _release_job(self) -> None:
+        if self._parts:
+            log.info("reunião encerrada: %d parte(s)", len(self._parts))
+            self.jobs.put((self._parts, self._job_title))
+        self._parts, self._job_title, self._held_since = [], None, None
+
+    def _discard_job(self) -> None:
+        for rec in self._parts:
+            rec.system_wav.unlink(missing_ok=True)
+            rec.mic_wav.unlink(missing_ok=True)
+        self._parts, self._job_title, self._held_since = [], None, None
+
+    # --- ações do usuário ----------------------------------------------------
 
     def cancel_current(self) -> None:
         with self._lock:
             if self.recorder.active:
                 self.recorder.cancel()
-                log.info("gravação cancelada pelo usuário")
+            self._discard_job()
+            log.info("gravação cancelada pelo usuário")
             self.detector.cancel()
 
     def manual_start(self, now: float) -> None:
         with self._lock:
             if self.recorder.active:
                 return
+            self._release_job()
             self.detector.force_start(now)
             if self._start_recorder(now):
                 self._warn(self.cancel_current, self.cfg.warning_seconds)
@@ -108,9 +159,10 @@ class Controller:
 
     def manual_stop(self) -> None:
         with self._lock:
-            title = self.detector.title
+            self._remember_title(self.detector.title)
             self.detector.force_stop()
-            self._stop_and_enqueue(title)
+            self._stop_part()
+            self._release_job()
 
     def shutdown(self) -> None:
         """Ao sair: encerra a gravação e deixa os WAVs para serem processados no próximo início."""
@@ -154,7 +206,7 @@ def _icon_image():
 
 
 def _worker(cfg: Config, jobs: queue.Queue) -> None:
-    from .pipeline import process_recording, retry_pending
+    from .pipeline import process_job, retry_pending
     from .ui import notify_processing_started, notify_silent
 
     try:
@@ -163,14 +215,15 @@ def _worker(cfg: Config, jobs: queue.Queue) -> None:
     except Exception:
         log.exception("erro ao refazer resumos pendentes")
     while True:
-        rec, title = jobs.get()
+        parts, title = jobs.get()
         try:
-            path = process_recording(
-                rec, title, cfg, notify=notify_silent, on_start=notify_processing_started
+            path = process_job(
+                parts, title, cfg, notify=notify_silent, on_start=notify_processing_started
             )
-            log.info("reunião salva: %s", path)
+            if path:
+                log.info("reunião salva: %s", path)
         except Exception:
-            log.exception("erro ao processar %s", rec.mic_wav)
+            log.exception("erro ao processar %s", parts[0].mic_wav)
 
 
 def _poller(controller: Controller, stop: threading.Event) -> None:
@@ -202,7 +255,7 @@ def main() -> None:
     jobs: queue.Queue = queue.Queue()
     for rec in find_leftover_recordings(cfg.work_dir):
         log.info("gravação pendente encontrada: %s", rec.mic_wav.name)
-        jobs.put((rec, None))
+        jobs.put(([rec], None))
 
     controller = Controller(
         cfg,
@@ -212,6 +265,7 @@ def main() -> None:
         warn=show_recording_warning,
         mic_probe=browser_mic_in_use,
         title_probe=find_meet_title,
+        render_probe=browser_playing_audio,
     )
     stop = threading.Event()
     threading.Thread(target=_worker, args=(cfg, jobs), daemon=True).start()
